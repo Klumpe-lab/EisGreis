@@ -1,0 +1,14 @@
+name: napari-lorenz
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - napari
+  - pyqt
+  - magicgui
+  - mrcfile
+  - numpy
+  - scipy
+  - scikit-image
+  - pandas
+  - jupyterlab
