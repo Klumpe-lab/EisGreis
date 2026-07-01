@@ -1,5 +1,7 @@
 # Napari Conda Environment
 
+This is a napari viewer optimized to look through your data, while keeping notes and marking interesting particles
+
 Create the environment with:
 
 ```bash
