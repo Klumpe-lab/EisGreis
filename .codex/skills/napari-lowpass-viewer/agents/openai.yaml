@@ -1,0 +1,3 @@
+display_name: Napari Lowpass Viewer
+short_description: Maintain the lazy-loading tomogram viewers, comments dock, and shared filters in this repo.
+default_prompt: Update the Napari_Lorenz viewer scripts, especially lazy MRC loading, separate comments handling, or shared filter and MRC helpers.

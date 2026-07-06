@@ -5,10 +5,10 @@ dependencies:
   - python=3.11
   - napari
   - pyqt
+  - pip
+  - scipy
   - magicgui
   - mrcfile
-  - numpy
-  - scipy
-  - scikit-image
-  - pandas
-  - jupyterlab
+  - imageio
+  - pip:
+      - napari-mrcfile-reader==0.2.0
