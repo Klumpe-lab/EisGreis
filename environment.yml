@@ -3,8 +3,8 @@ channels:
   - conda-forge
 dependencies:
   - python=3.11
-  - napari
-  - pyqt
+  - napari=0.6.6
+  - pyqt=5.15
   - pip
   - scipy
   - magicgui
