@@ -102,6 +102,8 @@ class LowPassController:
     MRC_PATTERNS = "*.mrc *.mrcs *.map *.st *.rec *.preali *.ali"
     SUPPORTED_SUFFIXES = (".mrc", ".mrcs", ".map", ".st", ".rec", ".preali", ".ali")
     SCALE_BAR_PREFERRED_VALUES = (1, 2, 5, 10, 15, 20, 25, 50, 75, 100, 125, 150, 200, 500, 750)
+    MEASUREMENT_UNIT_ANGSTROM = 10.0  # measurement layer data unit: 1 nm
+    PNG_SCALE_BAR_NM = 100.0
 
     def __init__(
         self,
@@ -697,26 +699,32 @@ class LowPassController:
 
         if self.measurement_layer is not None:
             measurement_ndim = int(self.measurement_layer.ndim)
-            self.measurement_layer.scale = tuple(1.0 for _ in range(measurement_ndim))
+            # Data unit of the measurement layer = 1 nm (world unit is Å), so the
+            # built-in length measure reports nanometres directly.
+            self.measurement_layer.scale = tuple(self.MEASUREMENT_UNIT_ANGSTROM for _ in range(measurement_ndim))
             self.measurement_layer.units = self._unit_tuple_for_ndim(measurement_ndim)
 
     def _preferred_scale_bar_length_angstrom(self, desired_length: float) -> float:
+        """Round scale-bar length in nm, returned in Å (the viewer's world unit)."""
         if not np.isfinite(desired_length) or desired_length <= 0:
-            return 1.0
+            return 10.0
+        desired_nm = desired_length / 10.0
         candidates: list[float] = []
         for power in range(-6, 7):
             factor = 1000.0**power
             candidates.extend(value * factor for value in self.SCALE_BAR_PREFERRED_VALUES)
         candidates = sorted(value for value in candidates if value > 0)
-        smaller = [value for value in candidates if value <= desired_length]
-        return smaller[-1] if smaller else candidates[0]
+        smaller = [value for value in candidates if value <= desired_nm]
+        length_nm = smaller[-1] if smaller else candidates[0]
+        return length_nm * 10.0
 
-    def _format_angstrom_length(self, value: float) -> str:
+    def _format_scale_bar_length(self, value_angstrom: float) -> str:
+        value = value_angstrom / 10.0
         if 0.01 <= abs(value) < 1_000_000:
             text = f"{value:.3f}".rstrip("0").rstrip(".")
         else:
             text = f"{value:.3g}"
-        return f"{text} Å"
+        return f"{text} nm"
 
     def _scale_bar_visual(self):
         qt_viewer = getattr(self.viewer.window, "_qt_viewer", None)
@@ -797,7 +805,7 @@ class LowPassController:
             target_world_angstrom = scale * visual._target_length
             length_angstrom = self._preferred_scale_bar_length_angstrom(target_world_angstrom)
             visual._current_length = length_angstrom / scale
-            visual.node.text.text = self._format_angstrom_length(length_angstrom)
+            visual.node.text.text = self._format_scale_bar_length(length_angstrom)
             self._prepare_scale_bar_visual(visual)
             visual._on_rendering_change()
             visual._on_position_change()
@@ -822,19 +830,19 @@ class LowPassController:
         layer = self.viewer.add_shapes(
             data=[],
             ndim=ndim,
-            name="Measurements (Å)",
+            name="Measurements (nm)",
             shape_type="line",
             edge_color="yellow",
             face_color="transparent",
-            edge_width=3,
+            edge_width=0.3,  # in nm data units = same 3 Å line width as before
             opacity=0.95,
-            scale=tuple(1.0 for _ in range(ndim)),
+            scale=tuple(self.MEASUREMENT_UNIT_ANGSTROM for _ in range(ndim)),
             units=self._unit_tuple_for_ndim(ndim),
-            metadata={"annotation_kind": "measurement_angstrom"},
+            metadata={"annotation_kind": "measurement_nm"},
         )
         self.measurement_layer = layer
         toggle_shape_measures(layer)
-        layer.text = "L = {_perimeter:.3g} Å"
+        layer.text = "L = {_perimeter:.3g} nm"
         layer.mode = "add_line"
         self._update_layer_spatial_calibration()
 
@@ -967,33 +975,102 @@ class LowPassController:
             return "slice"
         point = list(self.viewer.dims.point)
         if len(point) >= 3:
-            z = int(round(point[0]))
-            y = int(round(point[1]))
-            x = int(round(point[2]))
-            return f"x{x}_y{y}_z{z}"
+            return f"z{int(round(point[0]))}"
         if len(point) == 2:
-            y = int(round(point[0]))
-            x = int(round(point[1]))
-            return f"x{x}_y{y}"
+            return "slice"
         return "_".join(f"d{idx}_{int(round(value))}" for idx, value in enumerate(point))
+
+    def _png_source_layer(self) -> Optional[napari.layers.Image]:
+        """The image the user is looking at: filtered on top, else the original."""
+        for layer in (self.filtered_layer, self.source_layer):
+            if layer is not None and layer.visible:
+                return layer
+        return self.filtered_layer or self.source_layer
+
+    def _current_slice_rgb(self, layer: napari.layers.Image) -> np.ndarray:
+        """Current 2D slice at full resolution, with the layer's contrast and colormap."""
+        data = layer.data
+        if data.ndim < 2:
+            raise ValueError("Layer has fewer than 2 dimensions")
+        offset = self.viewer.dims.ndim - data.ndim
+        layer_order = [axis - offset for axis in self.viewer.dims.order if axis - offset >= 0]
+        row_axis, col_axis = layer_order[-2], layer_order[-1]
+
+        position = layer.world_to_data(self.viewer.dims.point)
+        index: list[object] = []
+        for axis in range(data.ndim):
+            if axis in (row_axis, col_axis):
+                index.append(slice(None))
+            else:
+                index.append(int(np.clip(round(float(position[axis])), 0, data.shape[axis] - 1)))
+        plane = np.asarray(data[tuple(index)], dtype=np.float32)
+        if row_axis > col_axis:
+            plane = plane.T
+
+        low, high = (float(v) for v in layer.contrast_limits)
+        scaled = np.clip((plane - low) / max(high - low, 1e-12), 0.0, 1.0)
+        if layer.gamma != 1:
+            scaled = scaled ** float(layer.gamma)
+        rgba = layer.colormap.map(scaled.ravel()).reshape(plane.shape + (4,))
+        return (np.clip(rgba[..., :3], 0.0, 1.0) * 255).round().astype(np.uint8)
+
+    def _burn_scale_bar(self, rgb: np.ndarray, pixel_size_angstrom: float, length_nm: float):
+        """White bar with label in the bottom-right corner, black outline for contrast."""
+        from PIL import Image, ImageDraw, ImageFont
+
+        image = Image.fromarray(rgb)
+        draw = ImageDraw.Draw(image)
+        height, width = rgb.shape[:2]
+        short_side = min(height, width)
+        bar_px = length_nm * 10.0 / pixel_size_angstrom
+        margin = max(round(0.04 * short_side), 6)
+        bar_h = max(round(0.012 * short_side), 3)
+        font_size = max(round(0.04 * short_side), 12)
+        try:
+            font = ImageFont.load_default(size=font_size)
+        except TypeError:  # Pillow < 10.1
+            font = ImageFont.load_default()
+
+        x1 = width - margin
+        x0 = x1 - bar_px
+        y1 = height - margin
+        y0 = y1 - bar_h
+        outline = max(1, bar_h // 3)
+        draw.rectangle([x0 - outline, y0 - outline, x1 + outline, y1 + outline], fill=(0, 0, 0))
+        draw.rectangle([x0, y0, x1, y1], fill=(255, 255, 255))
+        label = f"{length_nm:g} nm"
+        draw.text(
+            ((x0 + x1) / 2, y0 - outline - max(2, bar_h // 2)),
+            label,
+            font=font,
+            fill=(255, 255, 255),
+            anchor="md",
+            stroke_width=max(1, font_size // 12),
+            stroke_fill=(0, 0, 0),
+        )
+        return image, bar_px
 
     def _on_save_current_view_png(self, _value: object) -> None:
         if self.current_path is None:
             return
-        image = self.viewer.screenshot(canvas_only=True)
+        layer = self._png_source_layer()
+        if layer is None:
+            return
+        try:
+            rgb = self._current_slice_rgb(layer)
+        except Exception as exc:
+            self._set_annotation_status("PNG not saved", str(exc))
+            return
+        pixel_size = float(self.voxel_size_angstrom) if self.voxel_size_angstrom > 0 else 1.0
+        image, bar_px = self._burn_scale_bar(rgb, pixel_size, self.PNG_SCALE_BAR_NM)
+
         output_dir = self._png_output_dir()
         output_dir.mkdir(parents=True, exist_ok=True)
         file_name = f"{self.current_path.stem}__{self._current_slice_suffix()}.png"
         output_path = output_dir / file_name
-        try:
-            import imageio.v3 as iio
-
-            iio.imwrite(output_path, image)
-        except Exception:
-            from imageio import imwrite
-
-            imwrite(output_path, image)
-        self._set_annotation_status("Saved PNG", str(output_path))
+        image.save(output_path)
+        detail = f"{output_path} ({rgb.shape[1]}x{rgb.shape[0]} px, {self.PNG_SCALE_BAR_NM:g} nm = {bar_px:.1f} px)"
+        self._set_annotation_status("Saved PNG", detail)
 
     def _star_path_for_layer(self, layer: napari.layers.Points) -> Path:
         if self.current_path is None:
