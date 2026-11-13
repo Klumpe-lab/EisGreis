@@ -46,6 +46,36 @@ Measured on a 1024 x 1024 x 512 tomogram on an M3 Max:
 
 Ask for about 16 GB of memory per HPC desktop session for tomograms this size.
 
+### On the VBC CBE cluster
+
+Installed in `/groups/klumpe/software/Napari`:
+
+```
+Napari/
+  Napari_Lorenz/     this repository (git clone)
+  env/               conda environment from environment.yml
+  napari-viewer  ->  Napari_Lorenz/napari_viewer_hpc.sh
+```
+
+To use it, open a Remote Desktop at https://ood.cbenext.vbc.ac.at/ with about 16 GB of memory. In a terminal there, `cd` to the folder where comments, STAR files and PNGs should go, then run:
+
+```bash
+/groups/klumpe/software/Napari/napari-viewer /path/to/volume.mrc
+```
+
+To update after pushing changes from your PC:
+
+```bash
+git -C /groups/klumpe/software/Napari/Napari_Lorenz pull
+```
+
+If `environment.yml` changed, rebuild the environment on a login node. This uses CBE's Miniforge; don't run `conda init`:
+
+```bash
+export PATH=/software/system/utils/bin:$PATH CONDA_PKGS_DIRS=/scratch/users/$USER/conda-pkgs
+conda env update -p /groups/klumpe/software/Napari/env -f /groups/klumpe/software/Napari/Napari_Lorenz/environment.yml --prune
+```
+
 The main filter dock lets you add multiple MRC files, switch between them with a file selector, and apply a low-pass value in Angstrom using a numeric entry field. A status line shows how many tomograms are registered and how many are currently loaded. The filter dropdown switches between `hard`, `gaussian`, `butterworth`, and `cosine`.
 
 Comments live in a separate dock widget. Each tomogram can have a free-text comment, comments are saved to CSV, can be reloaded from a previous session, and are auto-saved on viewer close to `tomogram_comments.csv` by default unless you choose a different CSV path in the comments dock.
