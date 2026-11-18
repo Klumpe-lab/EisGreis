@@ -93,6 +93,8 @@ def parse_args() -> argparse.Namespace:
                        help="Keep the FFT in RAM (faster cutoff changes, ~2 GB more per 1k x 1k x 512 tomogram).")
     cache.add_argument("--no-spectrum-cache", dest="spectrum_cache", action="store_false",
                        help="Do not keep the FFT in RAM.")
+    parser.add_argument("--bundle", action="append", type=Path, default=[],
+                        help="crboost bundle (JSON) of picks and segmentations; repeat for more tomograms.")
     return parser.parse_args()
 
 
@@ -118,7 +120,7 @@ def main() -> None:
     from napari_mrc_lowpass_fast import RuntimeProfile, run_viewer
 
     profile = RuntimeProfile(name="HPC", workers=workers, cache_spectrum=cache_spectrum)
-    run_viewer(args.paths, profile, on_viewer_ready=report_opengl)
+    run_viewer(args.paths, profile, on_viewer_ready=report_opengl, bundles=args.bundle)
 
 
 if __name__ == "__main__":

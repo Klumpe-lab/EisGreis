@@ -43,6 +43,8 @@ from shared_filters_fast import (
 )
 from shared_mrc_fast import read_mrc_layer_data, read_voxel_size_array, read_voxel_size_from_path
 from shared_star import load_points_from_star, sanitize_star_token, save_points_to_star
+from crboost_bundle import BundleLayers
+from view3d import Volume3D
 
 
 def _patch_napari_text_dpi_fallback() -> None:
@@ -147,6 +149,14 @@ class LowPassController:
         self.viewer.layers.events.inserted.connect(self._on_layer_inserted)
         self.viewer.layers.events.removed.connect(self._on_layer_removed)
         self.viewer.window._qt_window.destroyed.connect(self._on_window_destroyed)
+        # crboost's picks and segmentations for the tomogram on screen (crboost_bundle.py), and 3-D on any
+        # renderer (view3d.py).
+        self.bundle = BundleLayers(self)
+        self.view3d = Volume3D(self)
+
+    def load_bundle(self, source) -> dict:
+        """Show a crboost bundle (a path or a parsed dict) with its tomogram; see crboost_bundle.py."""
+        return self.bundle.add(source)
 
     def _build_filter_controls(self):
         add_file = FileEdit(label="Add MRC", mode="r", filter=self.MRC_PATTERNS, value=None)
@@ -697,6 +707,9 @@ class LowPassController:
             layer.scale = scale
             layer.units = units
 
+        if getattr(self, "bundle", None) is not None:
+            self.bundle.rescale()
+
         if self.measurement_layer is not None:
             measurement_ndim = int(self.measurement_layer.ndim)
             # Data unit of the measurement layer = 1 nm (world unit is Å), so the
@@ -1206,6 +1219,8 @@ class LowPassController:
             self.filtered_layer.name = f"{path.name} (low-pass)"
             self.filtered_layer.colormap = "gray"
         self._update_layer_spatial_calibration()
+        self.view3d.watch(self.source_layer)
+        self.view3d.watch(self.filtered_layer)
 
         self._auto_contrast(self.filtered_layer.data, self.filtered_layer)
         self._update_status()
@@ -1230,6 +1245,7 @@ class LowPassController:
             progress.done(f"Loaded 1/{self.matched_count_for_status()} tomograms; current: {path.name}")
             self.startup_progress = None
 
+        self.bundle.show(path)
         self.viewer.scale_bar.visible = False
         self.viewer.reset_view()
         self._show_scale_bar_when_ready()
@@ -1259,6 +1275,8 @@ def parse_args() -> argparse.Namespace:
         description="Open MRC volumes in napari and interactively apply a low-pass filter."
     )
     parser.add_argument("paths", nargs="*", type=Path, help="Optional .mrc files to open on launch.")
+    parser.add_argument("--bundle", action="append", type=Path, default=[],
+                        help="crboost bundle (JSON) of picks and segmentations; repeat for more tomograms.")
     return parser.parse_args()
 
 
@@ -1266,6 +1284,7 @@ def run_viewer(
     paths: list[Path],
     profile: Optional[RuntimeProfile] = None,
     on_viewer_ready=None,
+    bundles: Optional[list[Path]] = None,
 ) -> None:
     profile = profile or RuntimeProfile()
     print(f"[napari-lorenz] {profile.describe()}", flush=True)
@@ -1276,6 +1295,8 @@ def run_viewer(
     if on_viewer_ready is not None:
         on_viewer_ready(viewer)
     controller = LowPassController(viewer, startup_progress=startup_progress, profile=profile)
+    for bundle in bundles or []:
+        controller.load_bundle(bundle)
     for index, path in enumerate(paths, start=1):
         controller.register_path(path)
         if startup_progress is not None:
@@ -1288,7 +1309,7 @@ def run_viewer(
 
 def main() -> None:
     args = parse_args()
-    run_viewer(args.paths)
+    run_viewer(args.paths, bundles=args.bundle)
 
 
 if __name__ == "__main__":
