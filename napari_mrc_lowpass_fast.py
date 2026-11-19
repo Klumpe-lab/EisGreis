@@ -160,7 +160,9 @@ class LowPassController:
 
     def _build_filter_controls(self):
         add_file = FileEdit(label="Add MRC", mode="r", filter=self.MRC_PATTERNS, value=None)
-        selected_file = ComboBox(label="File", choices=["No files loaded"], value="No files loaded")
+        # Choices as callables: napari re-reads every dock widget's choices (reset_choices) whenever a layer is
+        # added or removed, and a fixed list would fall back to the one the box was made with.
+        selected_file = ComboBox(label="File", choices=self._file_choice_names, value="No files loaded")
         pixel_size = LineEdit(label="Pixel size (Å/px)", value="1.0")
         cutoff = LineEdit(label="Low-pass (Å)", value="20")
         filter_type = ComboBox(label="Filter", choices=self.FILTER_CHOICES, value="gaussian")
@@ -221,9 +223,20 @@ class LowPassController:
         container.save_now = save_now
         return container
 
+    def _file_choice_names(self, _widget=None) -> list[str]:
+        return list(getattr(self, "file_labels", {}) or {}) or ["No files loaded"]
+
+    def _particle_layer_choice_names(self, _widget=None) -> list[str]:
+        if not getattr(self, "particle_layers", None):
+            return ["No particle layers"]
+        names = [layer.metadata.get("particle_name", layer.name) for layer in self._particle_layers_for_current_path()]
+        return names or ["No particle layers"]
+
     def _build_annotation_controls(self):
         particle_name = LineEdit(label="Particle name", value="ribosome")
-        particle_layers = ComboBox(label="Particle layer", choices=["No particle layers"], value="No particle layers")
+        particle_layers = ComboBox(
+            label="Particle layer", choices=self._particle_layer_choice_names, value="No particle layers"
+        )
         box_size = LineEdit(label="Box size (Å)", value="200")
         star_dir = LineEdit(label="STAR output dir", value=str(self.default_star_dir))
         load_star_dir = FileEdit(label="Load STAR dir", mode="d", value=None)
@@ -618,6 +631,9 @@ class LowPassController:
         empty = np.empty((0, point_dims), dtype=float)
         for particle_name, layer in self.particle_layers.items():
             coords = self.particle_coordinates.get(particle_name, {}).get(self.current_path)
+            # napari keeps the selection through a data swap: a point selected on the last tomogram would index
+            # past the end of this one's (IndexError in the style's current_border_width).
+            layer.selected_data = set()
             layer.data = coords.copy() if coords is not None else empty.copy()
             layer.visible = True
             layer.metadata["tomogram_path"] = str(self.current_path)
@@ -870,6 +886,11 @@ class LowPassController:
                 self.annotation_controls.box_size.value = str(self.particle_box_sizes_angstrom[particle_name])
             self.viewer.layers.selection.active = existing_layer
             existing_layer.mode = "add"
+            if update_status:
+                self._set_annotation_status(
+                    f"'{particle_name}' exists: selected, click to add points (new name for a new layer)",
+                    f"STAR dir: {self._star_output_dir()}",
+                )
             return existing_layer
 
         point_dims = int(self.source_layer.ndim) if int(self.source_layer.ndim) >= 2 else 2
@@ -1249,6 +1270,34 @@ class LowPassController:
         self.viewer.scale_bar.visible = False
         self.viewer.reset_view()
         self._show_scale_bar_when_ready()
+
+    def swap_volume(self, path: Path, label: str = "") -> None:
+        """Show another volume of the tomogram on screen in its place (a denoised version, from a crboost bundle):
+        the same grid, so particles, comments, measurements and STAR names stay with the tomogram that was opened.
+        The low-pass is applied afresh at the current cutoff. Raises when the grid differs."""
+        if self.current_path is None or self.source_layer is None or self.filtered_layer is None:
+            raise RuntimeError("No active tomogram loaded")
+        data, _add_kwargs, _layer_type = read_mrc_layer_data(Path(path))
+        if self.original_data is not None and data.shape != self.original_data.shape:
+            raise ValueError(f"{Path(path).name} is {data.shape}, the tomogram {self.original_data.shape}")
+        if self.lowpass is not None:
+            self.lowpass.release()
+        self.original_data = data
+        self.lowpass = LowPassFilter(
+            data,
+            self.voxel_size_angstrom,
+            workers=self.profile.workers,
+            cache_spectrum=self.profile.cache_spectrum,
+        )
+        self.source_layer.data = data
+        suffix = f" · {label}" if label else ""
+        self.source_layer.name = f"{self.current_path.name}{suffix} (original)"
+        try:
+            cutoff = float(self.controls.cutoff.value)
+        except ValueError:
+            cutoff = self.min_resolution_angstrom
+        self.apply_lowpass(cutoff, self.controls.filter_type.value)
+        self.filtered_layer.name = f"{self.filtered_layer.name}{suffix}"
 
     def matched_count_for_status(self) -> int:
         return len(self.loaded_paths)

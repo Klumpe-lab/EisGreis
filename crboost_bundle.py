@@ -21,8 +21,18 @@ The format (JSON):
          "shape_zyx": [512, 1024, 1024], "level": 63.5, "full_scale": 127, "color": "#f50057",
          "visible": true}                               # shown where value > level (p = 0.5)
       ],
+      "volumes": [                                     # pictures of this tomogram on its grid
+        {"name": "reconstruction (tsReconstruct)", "kind": "reconstruction", "path": "/abs/rec.mrc"},
+        {"name": "denoised · cryoCARE (denoisePredict)", "kind": "denoised", "path": "/abs/den.mrc"}
+      ],
       "notes": ["what crboost left out, and why"]
     }
+
+A "crboost" dock comes with a bundle. *Show* (with two or more ``volumes``) puts another volume in the tomogram's
+place (``LowPassController.swap_volume``), low-passed at the current cutoff, while particles, comments and STAR
+names stay with the tomogram that was opened; another tomogram starts again on the one it was opened as.
+*3-D segmentations* chooses how 3-D draws them (view3d.py): smooth surfaces, one layer per feature, or merged into
+one labels volume, the fastest and blocky.
 
 Picks are voxel coordinates of the tomogram, so they follow the pixel size the filter dock sets, like your own
 layers. In 2-D a pick draws as the cross-section of a sphere of its box size through the slice on screen (napari's
@@ -89,6 +99,11 @@ class BundleLayers:
         self.bundles: dict[Path, dict] = {}
         self.layers: list = []
         self.files: list = []
+        self.volume_box = None  # the "crboost" dock's widgets, made with the first bundle
+        self.mode_box = None
+        self.volume_dock = None
+        self._volumes: dict[str, dict] = {}
+        self._updating = False
 
     @property
     def viewer(self) -> napari.Viewer:
@@ -120,6 +135,7 @@ class BundleLayers:
         """Replace the drawn bundle with `path`'s (none: nothing drawn)."""
         self.clear()
         bundle = self.bundles.get(Path(path).resolve()) if path is not None else None
+        self._volume_controls(bundle)
         if bundle is None:
             return
         active = self.viewer.layers.selection.active
@@ -171,6 +187,11 @@ class BundleLayers:
                 "relative_voxel": ratio,
                 "bin_with": "max",  # thin features (membranes) survive binning for 3-D (view3d.py)
                 "max_voxels_3d": 16 * 2**20,  # a mask needs less than density: bin 4 for 1k x 1k x 512
+                # 3-D draws every visible segmentation as one labels volume (view3d.py): five ray-traced volumes
+                # were 6x slower than one.
+                "merge_3d": "crboost",
+                "level": level,
+                "color": seg.get("color", ""),
             },
         )
         self.layers.append(layer)
@@ -238,9 +259,85 @@ class BundleLayers:
             if src != dest:
                 self.viewer.layers.move(src, dest)
 
+    _MODES = {"smooth surfaces, one per feature": "surfaces", "merged, fastest (blocky)": "merged"}
+
+    def _volume_controls(self, bundle: dict | None) -> None:
+        """The crboost dock: the tomogram's volumes (set to the one on screen; the row hidden with fewer than two)
+        and the 3-D drawing of its segmentations. Hidden without a bundle."""
+        volumes = (bundle or {}).get("volumes") or []
+        if bundle is None:
+            self._volumes = {}
+            if self.volume_dock is not None:
+                self.volume_dock.setVisible(False)
+            return
+        if self.volume_box is None:
+            from magicgui.widgets import ComboBox, Container
+
+            # A callable: napari re-reads a dock's choices (reset_choices) whenever layers change, and a fixed list
+            # would fall back to the one the box was made with.
+            self.volume_box = ComboBox(label="Show", choices=lambda _widget: list(self._volumes))
+            self.volume_box.changed.connect(self._on_volume)
+            view3d = getattr(self.c, "view3d", None)
+            current_mode = getattr(view3d, "seg_mode", "surfaces")
+            self.mode_box = ComboBox(
+                label="3-D segmentations",
+                choices=lambda _widget: list(self._MODES),
+                value=next(k for k, v in self._MODES.items() if v == current_mode),
+            )
+            self.mode_box.changed.connect(self._on_mode)
+            container = Container(widgets=[self.volume_box, self.mode_box], labels=True)
+            self.volume_dock = self.viewer.window.add_dock_widget(container, area="right", name="crboost")
+        self._volumes = {v["name"]: v for v in volumes} if len(volumes) >= 2 else {}
+        self.volume_box.visible = bool(self._volumes)
+        self.mode_box.visible = bool(bundle.get("segmentations"))
+        self.volume_dock.setVisible(bool(self._volumes) or bool(bundle.get("segmentations")))
+        if not self._volumes:
+            return
+        opened = Path(bundle["tomogram"]).resolve()
+        current = next((v["name"] for v in volumes if Path(v["path"]).resolve() == opened), volumes[0]["name"])
+        self._updating = True
+        try:
+            self.volume_box.reset_choices()
+            self.volume_box.value = current
+        finally:
+            self._updating = False
+        self.volume_dock.setVisible(True)
+
+    def _on_mode(self, label: str) -> None:
+        view3d = getattr(self.c, "view3d", None)
+        if view3d is None or label not in self._MODES:
+            return
+        title = self.viewer.title
+        self.viewer.title = "Building 3-D segmentations…"
+        from qtpy.QtWidgets import QApplication
+
+        QApplication.processEvents()
+        try:
+            view3d.set_seg_mode(self._MODES[label])
+        finally:
+            self.viewer.title = title
+
+    def _on_volume(self, name: str) -> None:
+        if self._updating or name not in self._volumes:
+            return
+        from qtpy.QtWidgets import QApplication
+
+        volume = self._volumes[name]
+        title = self.viewer.title
+        self.viewer.title = f"Opening {name}…"
+        QApplication.processEvents()
+        try:
+            self.c.swap_volume(Path(volume["path"]), label=name.split(" (")[0])
+        except (OSError, ValueError, RuntimeError) as e:
+            logger.exception("volume %s not shown", volume["path"])
+            show_warning(f"{name} is not shown: {e}")
+        finally:
+            self.viewer.title = title
+
     def summary(self) -> dict[str, Any]:
         """What is drawn, for a caller's report."""
         return {
             "picks": [layer.name for layer in self.layers if isinstance(layer, napari.layers.Points)],
             "segmentations": [layer.name for layer in self.layers if isinstance(layer, napari.layers.Image)],
+            "volumes": list(self._volumes),
         }
