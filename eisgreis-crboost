@@ -1,0 +1,10 @@
+#!/bin/sh
+# EisGreis driven by crboost, from this install (see launch.sh for what it sets up first). In a remote desktop:
+#
+#     eisgreis-crboost            the window now; crboost finds this desktop and shows tomograms in it
+#     eisgreis-crboost --wait     no window until crboost's first request (what the desktop's autostart runs)
+#
+# crboost runs it with --session-dir on its own nodes; --version prints what this install reads, as JSON.
+here=$(dirname "$(readlink -f "$0")")
+command=eisgreis-crboost
+. "$here/launch.sh"
