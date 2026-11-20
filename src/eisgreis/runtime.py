@@ -1,37 +1,44 @@
-"""Launch the fast MRC viewer tuned for an HPC remote-desktop session.
+"""The machine the viewer runs on: CPUs, memory, the FFT cache, the GL renderer.
 
-- Uses only the CPUs the job was given (SLURM_CPUS_PER_TASK or CPU affinity),
-  not every core on the shared node.
-- Keeps the cached FFT only when the job has enough memory for it.
-- Checks that a display exists and warns when OpenGL is software-rendered
-  (no GPU), which makes 3D rendering slow; 2D slice browsing is still fine.
+Two profiles, chosen with ``eisgreis --profile``; without it, ``hpc`` where SLURM is present and ``pc`` elsewhere:
 
-Usage (inside the remote desktop session):
-    python napari_mrc_lowpass_hpc.py [volume.mrc ...] [--workers N] [--no-spectrum-cache | --spectrum-cache]
+- ``pc``, a workstation or laptop: FFTs on every core, and the forward FFT of the tomogram on screen kept in memory,
+  so a new cutoff needs one inverse FFT. (On an M3 Max all 16 cores were about 5 % faster than the 12 performance
+  cores alone.)
+- ``hpc``, a remote desktop on a cluster: only the CPUs the job was given (``SLURM_CPUS_PER_TASK`` or the CPU
+  affinity), not every core of the shared node, and the FFT cache only when the job has 24 GB or more.
 
-With a GPU visualisation node and VirtualGL:
-    vglrun python napari_mrc_lowpass_hpc.py volume.mrc
+This module imports nothing heavy: the thread limits must be set before NumPy and SciPy are imported.
 """
+
 from __future__ import annotations
 
-import argparse
 import os
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-# Below this job memory (GB) the FFT cache is off by default.
+# Below this job memory (GB) the FFT cache is off by default in the hpc profile.
 SPECTRUM_CACHE_MIN_MEMORY_GB = 24.0
 
+# The variables that cap BLAS and OpenMP threads, per profile.
+THREAD_VARIABLES = {
+    "pc": ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS"),
+    "hpc": ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"),
+}
+PROFILES = tuple(THREAD_VARIABLES)
 
-def allocated_cpus() -> int:
+
+def available_cpu_count() -> int:
+    """CPUs this process may actually use (respects SLURM and CPU affinity)."""
     slurm = os.environ.get("SLURM_CPUS_PER_TASK")
     if slurm and slurm.isdigit() and int(slurm) > 0:
         return int(slurm)
     if hasattr(os, "sched_getaffinity"):
         try:
             return max(len(os.sched_getaffinity(0)), 1)
-        except OSError:
+        except OSError:  # no affinity on this platform: count the cores instead
             pass
     return os.cpu_count() or 1
 
@@ -47,11 +54,56 @@ def allocated_memory_gb(cpus: int) -> Optional[float]:
     for cgroup_file in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
         try:
             raw = Path(cgroup_file).read_text().strip()
-        except OSError:
+        except OSError:  # this cgroup layout is not the machine's: try the other
             continue
         if raw.isdigit() and int(raw) < 1 << 60:
             return int(raw) / 1024.0**3
     return None
+
+
+def default_profile_name() -> str:
+    return "hpc" if os.environ.get("SLURM_JOB_ID") else "pc"
+
+
+@dataclass
+class RuntimeProfile:
+    """Machine-dependent performance settings."""
+
+    name: str = "auto"
+    workers: int = field(default_factory=available_cpu_count)
+    cache_spectrum: bool = True
+    contrast_samples: int = 4_000_000
+
+    def describe(self) -> str:
+        cache = "on" if self.cache_spectrum else "off"
+        return f"profile={self.name} | FFT threads={self.workers} | spectrum cache={cache}"
+
+
+def make_profile(
+    name: Optional[str] = None, workers: Optional[int] = None, spectrum_cache: Optional[bool] = None
+) -> RuntimeProfile:
+    """The profile `name` (``pc`` or ``hpc``; None picks by SLURM) with the threads capped to its CPUs.
+
+    Call it before NumPy is imported: the BLAS and OpenMP thread limits it sets are read at import."""
+    name = name or default_profile_name()
+    if name not in PROFILES:
+        raise ValueError(f"unknown profile {name!r}: one of {', '.join(PROFILES)}")
+    if name == "pc":
+        workers = workers or os.cpu_count() or 1
+        cache = True if spectrum_cache is None else spectrum_cache
+    else:
+        workers = workers or available_cpu_count()
+        memory_gb = allocated_memory_gb(workers)
+        cache = (
+            (memory_gb is None or memory_gb >= SPECTRUM_CACHE_MIN_MEMORY_GB)
+            if spectrum_cache is None
+            else spectrum_cache
+        )
+        mem_text = f"{memory_gb:.0f} GB" if memory_gb is not None else "unknown"
+        print(f"[eisgreis] HPC job: {workers} CPUs, memory limit {mem_text}", flush=True)
+    for var in THREAD_VARIABLES[name]:
+        os.environ.setdefault(var, str(workers))
+    return RuntimeProfile(name=name.upper(), workers=workers, cache_spectrum=cache)
 
 
 def check_display() -> None:
@@ -63,65 +115,21 @@ def check_display() -> None:
         )
 
 
-def report_opengl(viewer) -> None:
-    try:
-        from vispy.gloo import gl
+def is_software_renderer(renderer: str) -> bool:
+    return any(token in renderer.lower() for token in ("llvmpipe", "softpipe", "swrast", "software"))
 
-        scene_canvas = viewer.window._qt_viewer.canvas._scene_canvas
-        scene_canvas._backend._vispy_set_current()
-        renderer = str(gl.glGetParameter(gl.GL_RENDERER))
-    except Exception as exc:  # never block startup on this check
-        print(f"[napari-lorenz] Could not query OpenGL renderer: {exc}", flush=True)
-        return
-    print(f"[napari-lorenz] OpenGL renderer: {renderer}", flush=True)
-    if any(token in renderer.lower() for token in ("llvmpipe", "softpipe", "swrast", "software")):
+
+def report_opengl(viewer) -> str:
+    """Print the OpenGL renderer the canvas draws with, and a warning when it is software; returns it."""
+    from eisgreis._napari import gl_renderer
+
+    renderer = gl_renderer(viewer)
+    print(f"[eisgreis] OpenGL renderer: {renderer}", flush=True)
+    if is_software_renderer(renderer):
         print(
-            "[napari-lorenz] WARNING: software OpenGL (no GPU). 2D slice browsing works, "
+            "[eisgreis] WARNING: software OpenGL (no GPU). 2D slice browsing works, "
             "3D volume rendering will be slow.\n"
-            "               If your cluster has GPU visualisation nodes, start with: "
-            "vglrun python napari_mrc_lowpass_hpc.py ...",
+            "           For 3D, start EisGreis on a node with a full GPU: its launcher draws through VirtualGL there.",
             flush=True,
         )
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fast napari MRC low-pass viewer (HPC profile).")
-    parser.add_argument("paths", nargs="*", type=Path, help="Optional MRC files to open on launch.")
-    parser.add_argument("--workers", type=int, default=None, help="FFT threads (default: CPUs allocated to the job).")
-    cache = parser.add_mutually_exclusive_group()
-    cache.add_argument("--spectrum-cache", dest="spectrum_cache", action="store_true", default=None,
-                       help="Keep the FFT in RAM (faster cutoff changes, ~2 GB more per 1k x 1k x 512 tomogram).")
-    cache.add_argument("--no-spectrum-cache", dest="spectrum_cache", action="store_false",
-                       help="Do not keep the FFT in RAM.")
-    parser.add_argument("--bundle", action="append", type=Path, default=[],
-                        help="crboost bundle (JSON) of picks and segmentations; repeat for more tomograms.")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    check_display()
-
-    workers = args.workers or allocated_cpus()
-    memory_gb = allocated_memory_gb(workers)
-    if args.spectrum_cache is None:
-        cache_spectrum = memory_gb is None or memory_gb >= SPECTRUM_CACHE_MIN_MEMORY_GB
-    else:
-        cache_spectrum = args.spectrum_cache
-    mem_text = f"{memory_gb:.0f} GB" if memory_gb is not None else "unknown"
-    print(f"[napari-lorenz] HPC job: {workers} CPUs, memory limit {mem_text}", flush=True)
-
-    # Must be set before NumPy/SciPy are imported; stops BLAS/OpenMP from
-    # starting one thread per core of the whole node.
-    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-        os.environ.setdefault(var, str(workers))
-    os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
-
-    from napari_mrc_lowpass_fast import RuntimeProfile, run_viewer
-
-    profile = RuntimeProfile(name="HPC", workers=workers, cache_spectrum=cache_spectrum)
-    run_viewer(args.paths, profile, on_viewer_ready=report_opengl, bundles=args.bundle)
-
-
-if __name__ == "__main__":
-    main()
+    return renderer

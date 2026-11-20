@@ -1,52 +1,27 @@
-"""Reference layers from crboost: one tomogram's particle picks and segmentations.
+"""Reference layers: picks, segmentations and other volumes of a tomogram, to look at beside your own particle layers.
 
-crboost (the cryo-ET pipeline server) writes a bundle per tomogram. The viewer shows it while that tomogram is on
-screen, beside your own particle layers, and never saves it: these layers are crboost's results to look at, not
-annotations of yours. Load one with ``--bundle bundle.json`` on the command line or
-``controller.load_bundle(path_or_dict)``.
+They may come from anywhere: a STAR of picks from RELION or Warp, a segmentation from any tool, a pipeline's results.
+They are never saved, being someone else's results rather than annotations of yours, and every tomogram keeps its
+own: they are drawn while that tomogram is on screen.
 
-The format (JSON):
-
-    {
-      "format": "crboost-napari-bundle", "version": 1,
-      "tomogram": "/abs/path/tomogram.mrc",   # the volume the coordinates refer to
-      "shape_zyx": [512, 1024, 1024], "voxel_size": 6.2,   # that volume's grid (Å)
-      "picks": [
-        {"name": "ribosome · candidates (tmextractcand) (182)", "species": "ribosome",
-         "source": "candidates tmextractcand", "color": "#ff1744", "box_size": 310.0,
-         "coordinates_zyx": [[z, y, x], ...]}           # voxels of "tomogram"
-      ],
-      "segmentations": [
-        {"name": "membrane (segment)", "path": "/abs/seg.mrc", "voxel_size": 6.2,
-         "shape_zyx": [512, 1024, 1024], "level": 63.5, "full_scale": 127, "color": "#f50057",
-         "visible": true}                               # shown where value > level (p = 0.5)
-      ],
-      "volumes": [                                     # pictures of this tomogram on its grid
-        {"name": "reconstruction (tsReconstruct)", "kind": "reconstruction", "path": "/abs/rec.mrc"},
-        {"name": "denoised · cryoCARE (denoisePredict)", "kind": "denoised", "path": "/abs/den.mrc"}
-      ],
-      "notes": ["what crboost left out, and why"]
-    }
-
-A "crboost" dock comes with a bundle. *Show* (with two or more ``volumes``) puts another volume in the tomogram's
-place (``LowPassController.swap_volume``), low-passed at the current cutoff, while particles, comments and STAR
-names stay with the tomogram that was opened; another tomogram starts again on the one it was opened as.
-*3-D segmentations* chooses how 3-D draws them (view3d.py): smooth surfaces, one layer per feature, or merged into
-one labels volume, the fastest and blocky.
-
-Picks are voxel coordinates of the tomogram, so they follow the pixel size the filter dock sets, like your own
-layers. In 2-D a pick draws as the cross-section of a sphere of its box size through the slice on screen (napari's
-"rescale_spherical" projection). napari (0.9 on) only draws points inside the slice's thickness, so showing picks
-widens the Z thickness to the largest box; images still show their single plane. A segmentation keeps its own grid: ``voxel_size`` relative to the tomogram's says how much coarser it is,
-and both grids share the volume's corner.
+- **Picks** are voxel coordinates (Z, Y, X) of the tomogram, so they follow the pixel size the filter dock sets, like
+  your own layers. In 2-D a pick draws as the cross-section of a sphere of its box through the slice on screen
+  (napari's "rescale_spherical" projection). napari draws points only inside the slice's thickness, so picks widen
+  the Z thickness to the largest box; images still show their single plane.
+- **Segmentations** keep their own grid: their voxel size relative to the tomogram's says how much coarser it is, and
+  both grids share the volume's corner. A segmentation draws where its value passes its level, in its colour. In 3-D
+  it is drawn by ``view3d.py``, which knows it as a segmentation by its metadata (``merge_3d``), not by its source.
+- **Volumes** are other pictures of the tomogram on its own grid (a denoised one, say). With two or more, the
+  Reference dock's *Show* puts one in the tomogram's place (``swap_volume``), low-passed at the current cutoff,
+  while particles, comments and STAR names stay with the tomogram that was opened.
 """
 
 from __future__ import annotations
 
-import json
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any, Optional
 
 import mrcfile
 import napari
@@ -55,127 +30,225 @@ from napari.utils.colormaps import Colormap
 from napari.utils.notifications import show_warning
 
 if TYPE_CHECKING:
-    from napari_mrc_lowpass_fast import LowPassController
+    from eisgreis.app import Controller
 
 logger = logging.getLogger(__name__)
 
-FORMAT = "crboost-napari-bundle"
-VERSIONS = (1,)
-KIND = "crboost"  # layer.metadata["annotation_kind"] of every layer made here
+KIND = "reference"  # layer.metadata["annotation_kind"] of every layer made here
+MERGE_GROUP = "reference"  # the 3-D merge group of every segmentation (view3d.py)
 DEFAULT_BOX_ANGSTROM = 200.0
 
 
-def read_bundle(source: Union[str, Path, dict]) -> dict:
-    """The bundle from a path or an already parsed dict, checked for its format and version."""
-    bundle = source if isinstance(source, dict) else json.loads(Path(source).expanduser().read_text())
-    if bundle.get("format") != FORMAT or bundle.get("version") not in VERSIONS:
-        raise ValueError(f"not a crboost bundle this viewer reads (format {bundle.get('format')!r}, "
-                         f"version {bundle.get('version')!r})")
-    if not bundle.get("tomogram"):
-        raise ValueError("the bundle names no tomogram")
-    return bundle
-
-
 def _rgb(color: str) -> tuple[float, float, float]:
-    """'#rrggbb' as 0–1 floats; anything else is grey (crboost always writes hex)."""
+    """'#rrggbb' as 0–1 floats; anything else is grey."""
     c = str(color or "").lstrip("#")
     if len(c) != 6:
         return (0.7, 0.7, 0.7)
-    return tuple(int(c[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    return tuple(int(c[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
 
 
 def _mask_colormap(name: str, color: str) -> Colormap:
     """Transparent at the bottom of the contrast range, the feature's colour just above it: with the range starting
-    at the bundle's level, a probability volume draws as a solid mask of where it passes p = 0.5."""
+    at the segmentation's level, a probability volume draws as a solid mask of where it passes that level."""
     r, g, b = _rgb(color)
     return Colormap(colors=[[r, g, b, 0.0], [r, g, b, 0.75], [r, g, b, 0.75]], controls=[0.0, 0.02, 1.0], name=name)
 
 
-class BundleLayers:
-    """crboost bundles by tomogram path, and the layers of the one for the tomogram on screen."""
+@dataclass
+class ReferenceSet:
+    """One tomogram's reference layers, as given."""
 
-    def __init__(self, controller: "LowPassController") -> None:
+    picks: list[dict] = field(default_factory=list)
+    segmentations: list[dict] = field(default_factory=list)
+    volumes: list[dict] = field(default_factory=list)
+
+
+class ReferenceLayers:
+    """Reference layers by tomogram, and the drawn layers of the tomogram on screen."""
+
+    def __init__(self, controller: "Controller") -> None:
         self.c = controller
-        self.bundles: dict[Path, dict] = {}
+        self.sets: dict[Path, ReferenceSet] = {}
         self.layers: list = []
         self.files: list = []
-        self.volume_box = None  # the "crboost" dock's widgets, made with the first bundle
-        self.mode_box = None
-        self.volume_dock = None
-        self._volumes: dict[str, dict] = {}
-        self._updating = False
+        self.not_shown: list[str] = []  # what the last drawing could not draw, and why
+        self.dock = None  # the Reference dock (docks/reference.py), made when first needed
 
     @property
     def viewer(self) -> napari.Viewer:
         return self.c.viewer
 
-    def add(self, source: Union[str, Path, dict]) -> dict:
-        """Keep a bundle for its tomogram; draw it now when that tomogram is on screen."""
-        bundle = read_bundle(source)
-        path = Path(bundle["tomogram"]).expanduser().resolve()
-        self.bundles[path] = bundle
-        if self.c.current_path == path:
-            self.show(path)
-        return bundle
+    def _target(self, tomogram: Optional[Path]) -> Path:
+        path = Path(tomogram).expanduser().resolve() if tomogram is not None else self.c.session.current
+        if path is None:
+            raise RuntimeError("No tomogram is open, and none was named")
+        return path
+
+    def _on_screen(self, path: Path) -> bool:
+        return self.c.session.current == path and self.c.source_layer is not None
+
+    def _add(self, path: Path, kind: str, spec: dict) -> None:
+        """Keep `spec` for `path`'s tomogram; draw it at once when that tomogram is on screen. A spec that cannot
+        be drawn is not kept, and the error is raised."""
+        ref_set = self.sets.setdefault(path, ReferenceSet())
+        getattr(ref_set, kind).append(spec)
+        if not self._on_screen(path):
+            return
+        active = self.viewer.layers.selection.active
+        try:
+            if kind == "segmentations":
+                self._draw_segmentation(spec)
+            elif kind == "picks":
+                self._draw_picks(spec)
+        except Exception:
+            getattr(ref_set, kind).remove(spec)
+            raise
+        finally:
+            self._settle(ref_set, active)
+
+    # ── what a driver calls (through eisgreis.api) ─────────────────────────────────────────────────────────────
+
+    def show_picks(
+        self,
+        name: str,
+        coords_zyx,
+        box_angstrom: Optional[float] = None,
+        color: str = "",
+        *,
+        source: str = "",
+        pixel_size: Optional[float] = None,
+        tomogram: Optional[Path] = None,
+    ) -> None:
+        """Picks as voxel coordinates (Z, Y, X) of the tomogram whose voxels are `pixel_size` Å (default: its
+        header's), drawn as discs of `box_angstrom` in `color` ('#rrggbb')."""
+        coords = np.asarray(coords_zyx if coords_zyx is not None else [], dtype=float).reshape(-1, 3)
+        spec = {
+            "name": name,
+            "coords": coords,
+            "box": float(box_angstrom or DEFAULT_BOX_ANGSTROM),
+            "color": color,
+            "source": source,
+            "pixel_size": pixel_size,
+        }
+        self._add(self._target(tomogram), "picks", spec)
+
+    def show_segmentation(
+        self,
+        path: Path,
+        level: float = 0.5,
+        color: str = "",
+        voxel_size: Optional[float] = None,
+        *,
+        name: Optional[str] = None,
+        full_scale: float = 1.0,
+        visible: bool = True,
+        pixel_size: Optional[float] = None,
+        tomogram: Optional[Path] = None,
+    ) -> None:
+        """A segmentation volume at `path`, drawn where it passes `level`, in `color`. `voxel_size` is its own
+        voxel size (Å; default the tomogram's), `pixel_size` the tomogram grid's it is placed on (default: the
+        tomogram header's); `full_scale` the value at the top of its range."""
+        spec = {
+            "name": name or Path(path).stem,
+            "path": str(path),
+            "level": float(level),
+            "full_scale": float(full_scale or 1.0),
+            "color": color,
+            "voxel_size": voxel_size,
+            "visible": bool(visible),
+            "pixel_size": pixel_size,
+        }
+        self._add(self._target(tomogram), "segmentations", spec)
+
+    def add_volume(self, name: str, path: Path, kind: str = "", *, tomogram: Optional[Path] = None) -> None:
+        """Another picture of the tomogram on its grid, offered by the Reference dock's *Show*."""
+        target = self._target(tomogram)
+        self.sets.setdefault(target, ReferenceSet()).volumes.append({"name": name, "path": str(path), "kind": kind})
+        if self._on_screen(target):
+            self._update_dock(target)
+
+    def clear(self, tomogram: Optional[Path] = None) -> None:
+        """Drop a tomogram's reference layers (the one on screen by default)."""
+        target = self._target(tomogram)
+        self.sets.pop(target, None)
+        if self._on_screen(target):
+            self._remove_drawn()
+            self._update_dock(target)
 
     def forget(self, path: Path) -> None:
-        self.bundles.pop(Path(path).expanduser().resolve(), None)
-        if self.c.current_path == path:
-            self.clear()
+        path = Path(path).expanduser().resolve()
+        self.sets.pop(path, None)
+        if self.c.session.current == path:
+            self._remove_drawn()
 
-    def clear(self) -> None:
+    def summary(self, tomogram: Optional[Path] = None) -> dict[str, Any]:
+        """What is drawn for the tomogram on screen (or what is kept for `tomogram`), for a caller's report."""
+        target = self._target(tomogram)
+        ref_set = self.sets.get(target, ReferenceSet())
+        return {
+            "picks": [f"{p['name']}" for p in ref_set.picks],
+            "segmentations": [f"{s['name']}" for s in ref_set.segmentations],
+            "volumes": [v["name"] for v in self._volume_choices(target)],
+            "not_shown": list(self.not_shown) if self._on_screen(target) else [],
+        }
+
+    # ── drawing ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    def show(self, path: Optional[Path]) -> None:
+        """Replace the drawn layers with `path`'s (none: nothing drawn). Problems are listed in `not_shown` and
+        shown as a warning; the rest is drawn."""
+        self._remove_drawn()
+        path = Path(path).resolve() if path is not None else None
+        ref_set = self.sets.get(path) if path is not None else None
+        self._update_dock(path)
+        if ref_set is None:
+            return
+        active = self.viewer.layers.selection.active
+        problems: list[str] = []
+        for seg in ref_set.segmentations:
+            try:
+                self._draw_segmentation(seg)
+            except (OSError, ValueError) as e:
+                logger.exception("segmentation %s not shown", seg.get("path"))
+                problems.append(f"{seg.get('name')}: {e}")
+        for picks in ref_set.picks:
+            try:
+                self._draw_picks(picks)
+            except (TypeError, ValueError) as e:
+                logger.exception("picks %s not shown", picks.get("name"))
+                problems.append(f"{picks.get('name')}: {e}")
+        self.not_shown = problems
+        self._settle(ref_set, active)
+        if problems:
+            show_warning("Reference layers not shown: " + "; ".join(problems))
+
+    def _remove_drawn(self) -> None:
         for layer in self.layers:
             if layer in self.viewer.layers:
                 self.viewer.layers.remove(layer)
         for mrc in self.files:
             mrc.close()
-        self.layers, self.files = [], []
+        self.layers, self.files, self.not_shown = [], [], []
 
-    def show(self, path: Path | None) -> None:
-        """Replace the drawn bundle with `path`'s (none: nothing drawn)."""
-        self.clear()
-        bundle = self.bundles.get(Path(path).resolve()) if path is not None else None
-        self._volume_controls(bundle)
-        if bundle is None:
-            return
-        active = self.viewer.layers.selection.active
-        problems: list[str] = []
-        bundle_px = float(bundle.get("voxel_size") or 0) or self.c.header_voxel_size_angstrom
-        for seg in bundle.get("segmentations") or []:
-            try:
-                self._add_segmentation(seg, bundle_px)
-            except (OSError, ValueError) as e:
-                logger.exception("segmentation %s not shown", seg.get("path"))
-                problems.append(f"{seg.get('name')}: {e}")
-        for picks in bundle.get("picks") or []:
-            try:
-                self._add_picks(picks, bundle_px)
-            except (TypeError, ValueError) as e:
-                logger.exception("picks %s not shown", picks.get("name"))
-                problems.append(f"{picks.get('name')}: {e}")
-        self._stack_below_annotations()
-        self.rescale()
-        self._thicken_for_picks(bundle)
-        if active is not None and active in self.viewer.layers:
-            self.viewer.layers.selection.active = active
-        if problems:
-            show_warning("crboost layers not shown: " + "; ".join(problems))
+    def _grid_px(self, spec: dict) -> float:
+        return float(spec.get("pixel_size") or 0) or float(self.c.header_voxel_size_angstrom)
 
-    def _add_segmentation(self, seg: dict, bundle_px: float) -> None:
+    def _draw_segmentation(self, seg: dict) -> None:
         mrc = mrcfile.mmap(str(seg["path"]), mode="r", permissive=True)
         data = mrc.data
         if data is None or data.ndim != 3:
             mrc.close()
             raise ValueError(f"not a 3-D volume ({None if data is None else data.shape})")
         self.files.append(mrc)
-        level = float(seg.get("level", 0.5))
+        grid_px = self._grid_px(seg)
+        level = float(seg["level"])
         top = float(seg.get("full_scale") or 1.0)
-        ratio = float(seg.get("voxel_size") or bundle_px) / bundle_px
+        ratio = float(seg.get("voxel_size") or grid_px) / grid_px
         layer = self.viewer.add_image(
             data,
-            name=f"crboost · {seg.get('name', Path(seg['path']).stem)}",
+            name=seg["name"],
             **self._placement(ratio),
-            colormap=_mask_colormap(f"crboost-{seg.get('name')}", seg.get("color", "")),
+            colormap=_mask_colormap(f"reference-{seg['name']}", seg.get("color", "")),
             contrast_limits=(level, max(top, level + 1e-6)),
             blending="translucent",
             opacity=0.6,
@@ -187,24 +260,21 @@ class BundleLayers:
                 "relative_voxel": ratio,
                 "bin_with": "max",  # thin features (membranes) survive binning for 3-D (view3d.py)
                 "max_voxels_3d": 16 * 2**20,  # a mask needs less than density: bin 4 for 1k x 1k x 512
-                # 3-D draws every visible segmentation as one labels volume (view3d.py): five ray-traced volumes
-                # were 6x slower than one.
-                "merge_3d": "crboost",
+                "merge_3d": MERGE_GROUP,
                 "level": level,
                 "color": seg.get("color", ""),
             },
         )
         self.layers.append(layer)
 
-    def _add_picks(self, picks: dict, bundle_px: float) -> None:
-        coords = np.asarray(picks.get("coordinates_zyx") or [], dtype=float).reshape(-1, 3)
-        box = float(picks.get("box_size") or DEFAULT_BOX_ANGSTROM)
+    def _draw_picks(self, picks: dict) -> None:
+        coords = np.asarray(picks["coords"], dtype=float).reshape(-1, 3)
         r, g, b = _rgb(picks.get("color", ""))
         layer = self.viewer.add_points(
             coords,
-            name=f"crboost · {picks.get('name', 'picks')}",
+            name=picks["name"],
             **self._placement(1.0),
-            size=max(box / bundle_px, 2.0),
+            size=max(float(picks["box"]) / self._grid_px(picks), 2.0),
             symbol="disc",
             face_color="transparent",
             border_color=[r, g, b, 1.0],
@@ -217,16 +287,21 @@ class BundleLayers:
         layer.editable = False
         self.layers.append(layer)
 
+    def _settle(self, ref_set: ReferenceSet, active) -> None:
+        """After drawing: just above the tomogram, on its calibration, the slice thick enough for every pick; the
+        layer that was selected stays selected."""
+        self._stack_below_annotations()
+        self.rescale()
+        self._thicken_for_picks(ref_set)
+        if active is not None and active in self.viewer.layers:
+            self.viewer.layers.selection.active = active
+
     def _placement(self, ratio: float) -> dict:
         """scale, translate and units on the tomogram's current calibration (the filter dock's pixel size), for a
         grid `ratio` times as coarse as the tomogram's. It shares the volume's corner: its voxel i covers the
         tomogram's [i·r, (i+1)·r). Given at creation, so napari's slider range never sees a layer in voxels."""
         px = float(self.c.voxel_size_angstrom) if self.c.voxel_size_angstrom > 0 else 1.0
-        return {
-            "scale": (px * ratio,) * 3,
-            "translate": ((ratio - 1.0) / 2.0 * px,) * 3,
-            "units": ("angstrom",) * 3,
-        }
+        return {"scale": (px * ratio,) * 3, "translate": ((ratio - 1.0) / 2.0 * px,) * 3, "units": ("angstrom",) * 3}
 
     def rescale(self) -> None:
         """Follow a change of the tomogram's pixel size."""
@@ -235,18 +310,11 @@ class BundleLayers:
             layer.scale = placement["scale"]
             layer.translate = placement["translate"]
 
-    def _thicken_for_picks(self, bundle: dict) -> None:
+    def _thicken_for_picks(self, ref_set: ReferenceSet) -> None:
         """Z slice thickness (world Å) at least the largest box, so every pick the slice cuts is drawn."""
-        boxes = [float(p.get("box_size") or DEFAULT_BOX_ANGSTROM) for p in bundle.get("picks") or []]
-        if not boxes:
-            return
-        px = float(self.c.voxel_size_angstrom) if self.c.voxel_size_angstrom > 0 else 1.0
-        thickness = list(self.viewer.dims.thickness)
-        z_axis = len(thickness) - 3
-        if z_axis < 0:
-            return
-        thickness[z_axis] = max(thickness[z_axis], max(boxes) + px)
-        self.viewer.dims.thickness = tuple(thickness)
+        boxes = [float(p["box"]) for p in ref_set.picks]
+        if boxes:
+            self.c.ensure_z_thickness(max(boxes))
 
     def _stack_below_annotations(self) -> None:
         """Just above the tomogram, so your own particle and measurement layers stay on top."""
@@ -259,85 +327,26 @@ class BundleLayers:
             if src != dest:
                 self.viewer.layers.move(src, dest)
 
-    _MODES = {"smooth surfaces, one per feature": "surfaces", "merged, fastest (blocky)": "merged"}
+    # ── the Reference dock ─────────────────────────────────────────────────────────────────────────────────────
 
-    def _volume_controls(self, bundle: dict | None) -> None:
-        """The crboost dock: the tomogram's volumes (set to the one on screen; the row hidden with fewer than two)
-        and the 3-D drawing of its segmentations. Hidden without a bundle."""
-        volumes = (bundle or {}).get("volumes") or []
-        if bundle is None:
-            self._volumes = {}
-            if self.volume_dock is not None:
-                self.volume_dock.setVisible(False)
-            return
-        if self.volume_box is None:
-            from magicgui.widgets import ComboBox, Container
+    def _volume_choices(self, path: Optional[Path]) -> list[dict]:
+        """The volumes *Show* offers for `path`: its own, then the others; none with fewer than two."""
+        ref_set = self.sets.get(path) if path is not None else None
+        if ref_set is None or not ref_set.volumes:
+            return []
+        volumes = list(ref_set.volumes)
+        if not any(Path(v["path"]).resolve() == path for v in volumes):
+            volumes.insert(0, {"name": f"opened ({path.name})", "path": str(path), "kind": "opened"})
+        return volumes if len(volumes) >= 2 else []
 
-            # A callable: napari re-reads a dock's choices (reset_choices) whenever layers change, and a fixed list
-            # would fall back to the one the box was made with.
-            self.volume_box = ComboBox(label="Show", choices=lambda _widget: list(self._volumes))
-            self.volume_box.changed.connect(self._on_volume)
-            view3d = getattr(self.c, "view3d", None)
-            current_mode = getattr(view3d, "seg_mode", "surfaces")
-            self.mode_box = ComboBox(
-                label="3-D segmentations",
-                choices=lambda _widget: list(self._MODES),
-                value=next(k for k, v in self._MODES.items() if v == current_mode),
-            )
-            self.mode_box.changed.connect(self._on_mode)
-            container = Container(widgets=[self.volume_box, self.mode_box], labels=True)
-            self.volume_dock = self.viewer.window.add_dock_widget(container, area="right", name="crboost")
-        self._volumes = {v["name"]: v for v in volumes} if len(volumes) >= 2 else {}
-        self.volume_box.visible = bool(self._volumes)
-        self.mode_box.visible = bool(bundle.get("segmentations"))
-        self.volume_dock.setVisible(bool(self._volumes) or bool(bundle.get("segmentations")))
-        if not self._volumes:
-            return
-        opened = Path(bundle["tomogram"]).resolve()
-        current = next((v["name"] for v in volumes if Path(v["path"]).resolve() == opened), volumes[0]["name"])
-        self._updating = True
-        try:
-            self.volume_box.reset_choices()
-            self.volume_box.value = current
-        finally:
-            self._updating = False
-        self.volume_dock.setVisible(True)
+    def _update_dock(self, path: Optional[Path]) -> None:
+        ref_set = self.sets.get(path) if path is not None else None
+        volumes = self._volume_choices(path)
+        has_segmentations = bool(ref_set and ref_set.segmentations)
+        if self.dock is None:
+            if not volumes and not has_segmentations:
+                return
+            from eisgreis.docks.reference import ReferenceDock
 
-    def _on_mode(self, label: str) -> None:
-        view3d = getattr(self.c, "view3d", None)
-        if view3d is None or label not in self._MODES:
-            return
-        title = self.viewer.title
-        self.viewer.title = "Building 3-D segmentations…"
-        from qtpy.QtWidgets import QApplication
-
-        QApplication.processEvents()
-        try:
-            view3d.set_seg_mode(self._MODES[label])
-        finally:
-            self.viewer.title = title
-
-    def _on_volume(self, name: str) -> None:
-        if self._updating or name not in self._volumes:
-            return
-        from qtpy.QtWidgets import QApplication
-
-        volume = self._volumes[name]
-        title = self.viewer.title
-        self.viewer.title = f"Opening {name}…"
-        QApplication.processEvents()
-        try:
-            self.c.swap_volume(Path(volume["path"]), label=name.split(" (")[0])
-        except (OSError, ValueError, RuntimeError) as e:
-            logger.exception("volume %s not shown", volume["path"])
-            show_warning(f"{name} is not shown: {e}")
-        finally:
-            self.viewer.title = title
-
-    def summary(self) -> dict[str, Any]:
-        """What is drawn, for a caller's report."""
-        return {
-            "picks": [layer.name for layer in self.layers if isinstance(layer, napari.layers.Points)],
-            "segmentations": [layer.name for layer in self.layers if isinstance(layer, napari.layers.Image)],
-            "volumes": list(self._volumes),
-        }
+            self.dock = ReferenceDock(self.c)
+        self.dock.update(volumes, path, has_segmentations)

@@ -12,3 +12,13 @@ particle_stars/
 tomogram_pngs/
 tomogram_comments.csv
 test2.csv
+
+# environments and the cluster install's build products
+.venv/
+.uv/
+xlibs/
+xlibs.tmp-*/
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/

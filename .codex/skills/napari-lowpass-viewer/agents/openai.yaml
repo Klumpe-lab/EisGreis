@@ -1,3 +1,3 @@
-display_name: Napari Lowpass Viewer
-short_description: Maintain the lazy-loading tomogram viewers, comments dock, and shared filters in this repo.
-default_prompt: Update the Napari_Lorenz viewer scripts, especially lazy MRC loading, separate comments handling, or shared filter and MRC helpers.
+display_name: EisGreis viewer
+short_description: Maintain EisGreis, the lazy-loading tomogram viewer, its docks, filters, and the crboost link.
+default_prompt: Update EisGreis (src/eisgreis), especially lazy MRC loading, the comments and particle docks, or the filter and MRC helpers.

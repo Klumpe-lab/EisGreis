@@ -1,8 +1,9 @@
+"""A crYOLO-style Gaussian low-pass and high-pass on an open image layer, as a new layer; optionally live on the 2-D
+slice on screen. ``eisgreis-bandpass`` opens it in a viewer of its own."""
+
 import os
 from pathlib import Path
 from typing import Optional
-
-os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
 
 import napari
 import napari.layers
@@ -10,16 +11,10 @@ import numpy as np
 from napari.utils.notifications import show_info
 from qtpy.QtCore import QRegularExpression, Slot
 from qtpy.QtGui import QRegularExpressionValidator
-from qtpy.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QFormLayout,
-    QLineEdit,
-    QPushButton,
-    QWidget,
-)
-from shared_filters import gaussian_bandpass_filter
-from shared_mrc import read_voxel_size_from_path
+from qtpy.QtWidgets import QCheckBox, QComboBox, QFormLayout, QLineEdit, QPushButton, QWidget
+
+from eisgreis.filters import gaussian_bandpass_filter
+from eisgreis.io.mrc import read_voxel_size_from_path
 
 
 class CryoloBandpassWidget(QWidget):
@@ -38,9 +33,7 @@ class CryoloBandpassWidget(QWidget):
         self._pixel_size = QLineEdit("-1", self)
         self._pixel_size.setToolTip("Pixel size of the image in A/px.")
         self._filter_2d = QCheckBox(self)
-        self._filter_2d.setToolTip(
-            "If the layer is 3D, filter slice-by-slice in z rather than the full volume."
-        )
+        self._filter_2d.setToolTip("If the layer is 3D, filter slice-by-slice in z rather than the full volume.")
         self._show_mask = QCheckBox(self)
         self._show_mask.setToolTip("Visualize the Gaussian Fourier mask used for filtering.")
         self._run_btn = QPushButton("Run", self)
@@ -195,9 +188,7 @@ class CryoloBandpassWidget(QWidget):
     @Slot(object)
     def _update_combo(self, *_):
         layer_names = sorted(
-            entry.name
-            for entry in self.napari_viewer.layers
-            if isinstance(entry, napari.layers.Image)
+            entry.name for entry in self.napari_viewer.layers if isinstance(entry, napari.layers.Image)
         )
         current_text = self._layer.currentText()
 
@@ -242,6 +233,7 @@ class CryoloBandpassWidget(QWidget):
 
 
 def main() -> None:
+    os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
     viewer = napari.Viewer(title="Cryolo-style Gaussian Filter")
     widget = CryoloBandpassWidget(viewer)
     viewer.window.add_dock_widget(widget, area="right")

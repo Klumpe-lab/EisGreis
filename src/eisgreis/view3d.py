@@ -11,12 +11,12 @@ instant. The copies are binned in parallel threads. Density is binned by mean, a
 its own budget with ``metadata["max_voxels_3d"]``.
 
 Density draws as an attenuated maximum projection in the inverted colour map, a grey slab the segmentations and
-picks stand out against (a plain maximum projection is white, a minimum one saturates through 512 slices). ``metadata["rendering_3d"]`` and
-``metadata["colormap_3d"]`` on a layer choose otherwise; a layer's own rendering stays for the rest (a
-segmentation's isosurface).
+picks stand out against (a plain maximum projection is white, a minimum one saturates through 512 slices).
+``metadata["rendering_3d"]`` and ``metadata["colormap_3d"]`` on a layer choose otherwise; a layer's own rendering
+stays for the rest (a segmentation's isosurface).
 
-Layers that name the same ``metadata["merge_3d"]`` group (crboost's segmentations: probability volumes, shown where
-the value passes ``metadata["level"]``, in ``metadata["color"]``) draw in 3-D one of two ways (``seg_mode``):
+Layers that name the same ``metadata["merge_3d"]`` group (segmentations: probability volumes, shown where the
+value passes ``metadata["level"]``, in ``metadata["color"]``) draw in 3-D one of two ways (``seg_mode``):
 
 - ``"surfaces"`` (the default): a smooth mesh per layer, each its own layer with its own eye. Marching cubes on the
   binned volume (lightly smoothed, specks under 500 voxels dropped) at the finest step that keeps the mesh within
@@ -25,7 +25,7 @@ the value passes ``metadata["level"]``, in ``metadata["color"]``) draw in 3-D on
 - ``"merged"``: ONE labels volume, a label per visible layer; layers covering more go in first, so a membrane stays
   on top inside the cytoplasm. The fastest, but blocky (whole bin-4 voxels) and all or nothing.
 
-Five segmentation volumes took 380 ms a frame in software on 8 CPUs, one labels volume 62 ms (roadmap 56).
+Five segmentation volumes took 380 ms a frame in software on 8 CPUs, one labels volume 62 ms.
 
 The budget: 64 M voxels (256 MB as float32), what llvmpipe takes; ``NAPARI_3D_MAX_VOXELS`` sets another.
 """
@@ -44,7 +44,7 @@ from qtpy.QtCore import QTimer
 from qtpy.QtWidgets import QApplication
 
 if TYPE_CHECKING:
-    from napari_mrc_lowpass_fast import LowPassController
+    from eisgreis.app import Controller
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def _rgba(color: str | None) -> list[float]:
     c = str(color or "").lstrip("#")
     if len(c) != 6:
         return [0.8, 0.8, 0.8, 1.0]
-    return [int(c[i:i + 2], 16) / 255.0 for i in (0, 2, 4)] + [1.0]
+    return [int(c[i : i + 2], 16) / 255.0 for i in (0, 2, 4)] + [1.0]
 
 
 def taubin(verts: np.ndarray, faces: np.ndarray, iters: int = 8, lam: float = 0.5, mu: float = -0.53) -> np.ndarray:
@@ -119,7 +119,7 @@ def bin_volume(data, f: int, how: str = "mean") -> np.ndarray:
     nz, ny, nx = (n // f for n in data.shape)
     out = np.empty((nz, ny, nx), dtype=np.float32)
     for z in range(nz):
-        slab = np.asarray(data[z * f:(z + 1) * f, :ny * f, :nx * f], dtype=np.float32)
+        slab = np.asarray(data[z * f : (z + 1) * f, : ny * f, : nx * f], dtype=np.float32)
         blocks = slab.reshape(f, ny, f, nx, f)
         out[z] = blocks.max(axis=(0, 2, 4)) if how == "max" else blocks.mean(axis=(0, 2, 4))
     return out
@@ -128,7 +128,7 @@ def bin_volume(data, f: int, how: str = "mean") -> np.ndarray:
 class Volume3D:
     """Binned stand-ins for the big image layers while the canvas is in 3-D."""
 
-    def __init__(self, controller: "LowPassController", max_voxels: int | None = None) -> None:
+    def __init__(self, controller: "Controller", max_voxels: int | None = None) -> None:
         self.c = controller
         self.max_voxels = int(max_voxels or os.environ.get("NAPARI_3D_MAX_VOXELS") or DEFAULT_MAX_VOXELS)
         self.proxies: dict = {}  # full layer -> its binned stand-in
@@ -156,7 +156,7 @@ class Volume3D:
         return self.viewer.dims.ndisplay == 3
 
     def set_seg_mode(self, mode: str) -> None:
-        """"surfaces" or "merged"; redrawn at once when in 3-D."""
+        """ "surfaces" or "merged"; redrawn at once when in 3-D."""
         if mode not in ("surfaces", "merged"):
             raise ValueError(f"unknown segmentation mode {mode!r}")
         self.seg_mode = mode
@@ -237,7 +237,7 @@ class Volume3D:
         key = tuple((id(m), id(m.data)) for m in members)
         if key in self.label_cache:
             return self.label_cache[key]
-        masks = [b > float(m.metadata.get("level", 0.5)) for m, b in zip(members, binned)]
+        masks = [b > float(m.metadata.get("level", 0.5)) for m, b in zip(members, binned, strict=True)]
         labels = np.zeros(binned[0].shape, dtype=np.uint8)
         for i in sorted(range(len(members)), key=lambda i: -int(masks[i].sum())):
             labels[masks[i]] = i + 1
@@ -270,7 +270,9 @@ class Volume3D:
         key = (id(full), id(full.data), self.triangle_budget)
         if key not in self.mesh_cache:
             binned, _f = self._binned(full)
-            self.mesh_cache[key] = segmentation_mesh(binned, float(full.metadata.get("level", 0.5)), self.triangle_budget)
+            self.mesh_cache[key] = segmentation_mesh(
+                binned, float(full.metadata.get("level", 0.5)), self.triangle_budget
+            )
         return self.mesh_cache[key]
 
     def _add_surface(self, full, mesh, f: int):
@@ -330,9 +332,11 @@ class Volume3D:
         QApplication.processEvents()
         try:
             with ThreadPoolExecutor(max_workers=max(1, min(len(targets), os.cpu_count() or 1))) as pool:
-                results = dict(zip(map(id, targets), pool.map(self._binned, targets)))
+                results = dict(zip(map(id, targets), pool.map(self._binned, targets), strict=True))
                 members_all = [m for members in groups.values() for m in members]
-                meshes = dict(zip(map(id, members_all), pool.map(self._mesh, members_all))) if surfaces else {}
+                meshes = (
+                    dict(zip(map(id, members_all), pool.map(self._mesh, members_all), strict=True)) if surfaces else {}
+                )
             for key, members in groups.items():
                 if surfaces:
                     for m in members:

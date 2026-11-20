@@ -1,0 +1,63 @@
+[project]
+name = "eisgreis"
+version = "0.1.0"
+description = "A napari viewer for cryo-ET tomograms: low-pass in Å, comments, particle STARs, reference layers, 3-D on any renderer"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+    "napari[pyqt6]>=0.10,<0.11",
+    "PyQt6>=6.7",
+    "qtpy>=2.4",
+    "magicgui>=0.10",
+    "vispy>=0.17,<0.18",
+    "pint>=0.17",
+    "mrcfile>=1.5",
+    "numpy>=1.25",
+    "scipy>=1.14",
+    "scikit-image>=0.20",
+    "pillow>=10",
+    "imageio>=2.20",
+    # napari's own File > Open of MRC files; the viewer reads its volumes with mrcfile itself.
+    "napari-mrcfile-reader==0.2.0",
+]
+
+[project.scripts]
+eisgreis = "eisgreis.__main__:main"
+eisgreis-tilts = "eisgreis.tilts.excluder:main"
+eisgreis-bandpass = "eisgreis.docks.bandpass:main"
+eisgreis-crboost = "eisgreis_crboost.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff==0.15.12"]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = ["eisgreis", "eisgreis_crboost"]
+
+[tool.uv]
+# uv's own Pythons (python-build-standalone, glibc 2.17 and up), never the host's: an environment built on a host
+# Python does not start inside a remote desktop's image that lacks that Python.
+python-preference = "only-managed"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [".uv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["eisgreis", "eisgreis_crboost"]
+split-on-trailing-comma = false
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

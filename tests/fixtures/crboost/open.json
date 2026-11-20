@@ -1,0 +1,13 @@
+{
+  "protocol": 1,
+  "seq": 1795108741720,
+  "title": "TS_01",
+  "layers": [
+    {
+      "name": "TS_01",
+      "path": "${DATA}/demo_project/External/job007/warp_tiltseries/reconstruction/TS_01_10.00Apx.mrc"
+    }
+  ],
+  "outputs": "${DATA}/demo_project/Curation/napari",
+  "bundle": "${SESSION}/bundle.json"
+}

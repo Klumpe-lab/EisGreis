@@ -1,0 +1,65 @@
+{
+  "format": "crboost-napari-bundle",
+  "version": 1,
+  "tomogram": "${DATA}/demo_project/External/job007/warp_tiltseries/reconstruction/TS_01_10.00Apx.mrc",
+  "tomo_name": "TS_01",
+  "project": "${DATA}/demo_project",
+  "shape_zyx": [
+    24,
+    40,
+    36
+  ],
+  "voxel_size": 10.0,
+  "picks": [
+    {
+      "name": "ribosome \u00b7 candidates (tmextractcand) (2)",
+      "species": "ribosome",
+      "source": "candidates tmextractcand",
+      "color": "#ff1744",
+      "box_size": 300.0,
+      "coordinates_zyx": [
+        [
+          12.0,
+          20.0,
+          18.0
+        ],
+        [
+          15.0,
+          16.0,
+          23.0
+        ]
+      ]
+    }
+  ],
+  "segmentations": [
+    {
+      "name": "membrane (segment)",
+      "path": "${DATA}/demo_project/External/job011/segmentations/TS_01__membrane.mrc",
+      "voxel_size": 20.0,
+      "shape_zyx": [
+        12,
+        20,
+        18
+      ],
+      "level": 63.5,
+      "full_scale": 127.0,
+      "color": "#f50057",
+      "visible": true
+    }
+  ],
+  "volumes": [
+    {
+      "name": "reconstruction (tsReconstruct)",
+      "kind": "reconstruction",
+      "path": "${DATA}/demo_project/External/job007/warp_tiltseries/reconstruction/TS_01_10.00Apx.mrc"
+    },
+    {
+      "name": "denoised \u00b7 cryocare (denoisePredict)",
+      "kind": "denoised",
+      "path": "${DATA}/demo_project/External/job009/denoised/TS_01_10.00Apx.mrc"
+    }
+  ],
+  "notes": [
+    "tmextractcand__other: belongs to no registered species: not shown"
+  ]
+}

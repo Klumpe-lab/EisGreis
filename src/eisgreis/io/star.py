@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 import numpy as np
 
@@ -13,10 +13,7 @@ def sanitize_star_token(value: str) -> str:
 
 
 def save_points_to_star(
-    coordinates: np.ndarray,
-    output_path: Path,
-    layer_name: str,
-    box_size_angstrom: float | None = None,
+    coordinates: np.ndarray, output_path: Path, layer_name: str, box_size_angstrom: float | None = None
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -98,12 +95,7 @@ def load_points_from_star(output_path: Path) -> tuple[np.ndarray, float | None]:
                 ]
             )
         elif "_rlnCoordinateY" in header_index:
-            coords.append(
-                [
-                    row[header_index["_rlnCoordinateY"]],
-                    row[header_index["_rlnCoordinateX"]],
-                ]
-            )
+            coords.append([row[header_index["_rlnCoordinateY"]], row[header_index["_rlnCoordinateX"]]])
         elif "_rlnCoordinateX" in header_index:
             coords.append([row[header_index["_rlnCoordinateX"]]])
 

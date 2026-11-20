@@ -1,99 +1,98 @@
-# Napari Conda Environment
+# EisGreis
 
-This is a napari viewer optimized to look through your data, while keeping notes and marking interesting particles
+A napari viewer optimized to look through your tomograms, while keeping notes and marking interesting particles.
 
-Create the environment with:
+## Install and run
 
-```bash
-conda env create -f environment.yml
-conda activate napari-lorenz
-```
-
-Run the MRC viewer with:
+With [uv](https://docs.astral.sh/uv/), on macOS or Linux:
 
 ```bash
-python napari_mrc_lowpass.py
+git clone https://github.com/Klumpe-lab/EisGreis.git
+cd EisGreis
+uv sync
+uv run eisgreis /path/to/volume1.mrc /path/to/volume2.mrc
 ```
 
-Open one or more files immediately on launch with:
+The first file opens; the others wait in the file list. Run it in the folder where the comments CSV, the particle
+STARs and the PNGs should go. On a cluster, `install.sh` makes a lab install with launchers for remote desktops:
+[docs/install.md](docs/install.md).
 
-```bash
-python napari_mrc_lowpass.py /path/to/volume1.mrc /path/to/volume2.mrc
-```
-
-### Fast viewer: PC and HPC launchers
-
-`napari_mrc_lowpass_fast.py` is a faster copy of the viewer with the same features. It uses `shared_filters_fast.py` and `shared_mrc_fast.py`, and the original scripts are unchanged. Start it through the launcher for the machine you are on:
+`eisgreis --profile pc|hpc` picks the machine's settings (without it, `hpc` where SLURM is present):
 
 ```bash
 # Workstation / laptop: all cores, FFT kept in RAM for quick cutoff changes
-python napari_mrc_lowpass_pc.py /path/to/volume.mrc
+uv run eisgreis --profile pc /path/to/volume.mrc
 
-# HPC remote desktop (run in a terminal inside the desktop session)
-python napari_mrc_lowpass_hpc.py /path/to/volume.mrc
-# with a GPU visualisation node and VirtualGL:
-vglrun python napari_mrc_lowpass_hpc.py /path/to/volume.mrc
+# HPC remote desktop: only the CPUs given to the job (SLURM_CPUS_PER_TASK or CPU affinity), the FFT cache only with
+# at least 24 GB of job memory (--spectrum-cache / --no-spectrum-cache override that); it prints the OpenGL renderer
+# and warns when rendering is software-only
+uv run eisgreis --profile hpc /path/to/volume.mrc
 ```
 
-The HPC launcher only uses the CPUs given to the job (`SLURM_CPUS_PER_TASK` or CPU affinity). It keeps the FFT cache only if the job has at least 24 GB of memory, which you can override with `--spectrum-cache` or `--no-spectrum-cache`. It also prints the OpenGL renderer and warns when rendering is software-only. Both launchers accept `--workers N`.
+Both accept `--workers N`.
 
 Measured on a 1024 x 1024 x 512 tomogram on an M3 Max:
 
 | | Open tomogram | Change cutoff | Peak RAM |
 |---|---|---|---|
-| Original viewer | ~30 s | ~18 s | 19.4 GB |
-| Fast viewer | ~0.7 s | ~0.5 s | 11.3 GB (9.2 GB without FFT cache) |
+| First viewer | ~30 s | ~18 s | 19.4 GB |
+| EisGreis | ~0.7 s | ~0.5 s | 11.3 GB (9.2 GB without FFT cache) |
 
 Ask for about 16 GB of memory per HPC desktop session for tomograms this size.
 
-### On the VBC CBE cluster
+## What it does
 
-Installed in `/groups/klumpe/software/Napari`:
+The main filter dock lets you add multiple MRC files, switch between them with a file selector, and apply a low-pass
+value in Angstrom using a numeric entry field. A status line shows how many tomograms are registered and how many are
+currently loaded. The filter dropdown switches between `hard`, `gaussian`, `butterworth`, and `cosine`.
 
-```
-Napari/
-  Napari_Lorenz/     this repository (git clone)
-  env/               conda environment from environment.yml
-  napari-viewer  ->  Napari_Lorenz/napari_viewer_hpc.sh
-```
+Comments live in a separate dock widget. Each tomogram can have a free-text comment, comments are saved to CSV, can
+be reloaded from a previous session, and are auto-saved on viewer close to `tomogram_comments.csv` by default unless
+you choose a different CSV path in the comments dock.
 
-To use it, open a Remote Desktop at https://ood.cbenext.vbc.ac.at/ with about 16 GB of memory. In a terminal there, `cd` to the folder where comments, STAR files and PNGs should go, then run:
+Particle annotations live in their own dock widget. Create multiple napari points layers per tomogram, give each one
+a particle name such as `ribosome`, and save each layer to its own STAR file in `particle_stars/` by default. The STAR
+filename includes both the tomogram stem and the layer name, and layers are auto-saved when you switch tomograms or
+close the viewer.
 
-```bash
-/groups/klumpe/software/Napari/napari-viewer /path/to/volume.mrc
-```
+The scale bar and the measurement layer read in nm; *Save current view PNG* writes the slice on screen, at full
+resolution, with a 100 nm scale bar burned in.
 
-To update after pushing changes from your PC:
-
-```bash
-git -C /groups/klumpe/software/Napari/Napari_Lorenz pull
-```
-
-If `environment.yml` changed, rebuild the environment on a login node. This uses CBE's Miniforge; don't run `conda init`:
-
-```bash
-export PATH=/software/system/utils/bin:$PATH CONDA_PKGS_DIRS=/scratch/users/$USER/conda-pkgs
-conda env update -p /groups/klumpe/software/Napari/env -f /groups/klumpe/software/Napari/Napari_Lorenz/environment.yml --prune
-```
-
-The main filter dock lets you add multiple MRC files, switch between them with a file selector, and apply a low-pass value in Angstrom using a numeric entry field. A status line shows how many tomograms are registered and how many are currently loaded. The filter dropdown switches between `hard`, `gaussian`, `butterworth`, and `cosine`.
-
-Comments live in a separate dock widget. Each tomogram can have a free-text comment, comments are saved to CSV, can be reloaded from a previous session, and are auto-saved on viewer close to `tomogram_comments.csv` by default unless you choose a different CSV path in the comments dock.
-
-Particle annotations live in their own dock widget. Create multiple napari points layers per tomogram, give each one a particle name such as `ribosome`, and save each layer to its own STAR file in `particle_stars/` by default. The STAR filename includes both the tomogram stem and the layer name, and layers are auto-saved when you switch tomograms or close the viewer.
+Reference layers show picks, segmentations and other volumes of a tomogram beside your own layers, without saving
+them; 3-D (Ctrl+Y) works on any renderer, from binned copies of the big volumes, with segmentations as smooth
+surfaces.
 
 Run the tilt-series browser with:
 
 ```bash
-python napari_tilt_series_excluder.py
+uv run eisgreis-tilts
 ```
 
 Or open a specific `.mdoc` plus the folder containing the tilt images:
 
 ```bash
-python napari_tilt_series_excluder.py --mdoc /path/to/series.mdoc --tilt-dir /path/to/tilts
+uv run eisgreis-tilts --mdoc /path/to/series.mdoc --tilt-dir /path/to/tilts
 ```
 
-The tilt-series browser reads SerialEM `.mdoc` metadata, sorts the entries by `TiltAngle` like the RELION bad-tilt exclusion workflow, matches each entry against files in the chosen tilt folder, and lets you step through the images while marking each tilt as kept or excluded.
+The tilt-series browser reads SerialEM `.mdoc` metadata, sorts the entries by `TiltAngle` like the RELION bad-tilt
+exclusion workflow, matches each entry against files in the chosen tilt folder, and lets you step through the images
+while marking each tilt as kept or excluded.
 
-This environment now starts from the `napari-mrcfile-reader` plugin stack, installed into a conda-based napari environment via `pip`.
+`uv run eisgreis-bandpass` opens a crYOLO-style Gaussian low-pass and high-pass filter on any open image layer.
+
+## For code
+
+`eisgreis.api` is the one module code outside the viewer imports: `build()`, `run()`, and `TomogramViewer` with
+`open`, `set_outputs`, `save`, `reload_annotations`, `reference.show_picks` / `show_segmentation` / `add_volume`,
+and `view3d.set_seg_mode`. Everything else is internal.
+
+`eisgreis_crboost` is the link to crboost, the cryo-ET pipeline server: `eisgreis-crboost` shows the tomograms crboost
+asks for. It uses `eisgreis.api` only, and the viewer never imports it; the two sides talk through versioned files
+([docs/crboost-protocol.md](docs/crboost-protocol.md)).
+
+Tests: `uv run pytest` (the viewer's tests need a display for OpenGL; headless, `xvfb-run -a uv run pytest` with
+`QT_QPA_PLATFORM=offscreen`). Lint: `uv run ruff check .` and `uv run ruff format .`.
+
+## Licence
+
+BSD-3-Clause, as napari's: [LICENSE](LICENSE).

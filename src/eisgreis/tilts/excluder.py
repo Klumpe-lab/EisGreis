@@ -1,37 +1,27 @@
+"""The tilt-series excluder: a SerialEM mdoc's tilts in tilt-angle order, as RELION's bad-tilt exclusion takes them,
+each matched to its image in a folder; step through them, low-pass them, and mark each kept or excluded.
+
+``eisgreis-tilts [--mdoc series.mdoc --tilt-dir folder]``
+"""
+
 import argparse
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
-
-try:
-    import napari
-except ModuleNotFoundError as exc:
-    if exc.name == "napari":
-        script_path = Path(__file__).resolve()
-        raise SystemExit(
-            "napari is not installed in the current Python environment.\n"
-            "Use the napari-lorenz environment instead:\n"
-            f"  conda run -n napari-lorenz python {script_path}\n"
-            "or:\n"
-            "  conda activate napari-lorenz\n"
-            f"  python {script_path}"
-        ) from exc
-    raise
-
+import napari
 import numpy as np
 from magicgui.widgets import CheckBox, ComboBox, Container, FileEdit, FloatSlider, Label, PushButton
 from napari.utils.notifications import show_info
 
-from shared_filters import apply_lowpass, frequency_grid, resolution_bounds
-from shared_mdoc import MdocTiltEntry, parse_mdoc, resolve_tilt_image_path, sort_entries_by_tilt_angle
-from shared_mrc import read_mrc_layer_data, read_voxel_size_from_path
+from eisgreis.filters import FILTER_CHOICES, LowPassFilter, resolution_bounds
+from eisgreis.io.mdoc import MdocTiltEntry, parse_mdoc, resolve_tilt_image_path, sort_entries_by_tilt_angle
+from eisgreis.io.mrc import MRC_SUFFIXES, read_mrc_layer_data, read_voxel_size_from_path
 
 try:
     import imageio.v3 as iio
-except Exception:  # pragma: no cover - runtime fallback
+except ImportError:  # without imageio, non-MRC tilt images cannot be read; MRC ones still can
     iio = None
 
 
@@ -46,13 +36,13 @@ class TiltRecord:
 
 
 class TiltSeriesLowPassController:
-    FILTER_CHOICES = ("hard", "gaussian", "butterworth", "cosine")
+    FILTER_CHOICES = FILTER_CHOICES
 
     def __init__(self, viewer: napari.Viewer) -> None:
         self.viewer = viewer
         self._updating_controls = False
         self.current_original_data: Optional[np.ndarray] = None
-        self.current_frequency_grid: Optional[np.ndarray] = None
+        self.lowpass: Optional[LowPassFilter] = None
         self.image_layer: Optional[napari.layers.Image] = None
         self.current_path: Optional[Path] = None
 
@@ -69,15 +59,7 @@ class TiltSeriesLowPassController:
         cutoff.changed.connect(self._on_lowpass_controls_changed)
         filter_type.changed.connect(self._on_lowpass_controls_changed)
 
-        container = Container(
-            widgets=[
-                lowpass_enabled,
-                cutoff,
-                filter_type,
-                status,
-            ],
-            labels=True,
-        )
+        container = Container(widgets=[lowpass_enabled, cutoff, filter_type, status], labels=True)
         container.native.setWindowTitle("Tilt Low-pass")
         container.lowpass_enabled = lowpass_enabled
         container.cutoff = cutoff
@@ -90,13 +72,13 @@ class TiltSeriesLowPassController:
         self.current_original_data = data
         self.current_path = path
         self.image_layer = image_layer
-        self.current_frequency_grid = frequency_grid(data.shape, voxel_size)
+        self.lowpass = LowPassFilter(data, voxel_size)
         self._configure_lowpass_controls(data.shape, voxel_size)
         self.controls.status.value = f"Filtering {path.name}"
         self._render_current_image()
 
     def _read_voxel_size(self, path: Path) -> float:
-        if path.suffix.lower() in TiltSeriesExcluderController.MRC_SUFFIXES:
+        if path.suffix.lower() in MRC_SUFFIXES:
             voxel_size = read_voxel_size_from_path(path)
             if voxel_size is not None and np.isfinite(voxel_size) and voxel_size > 0:
                 return float(voxel_size)
@@ -108,10 +90,7 @@ class TiltSeriesLowPassController:
         try:
             self.controls.cutoff.min = min_resolution
             self.controls.cutoff.max = max_resolution
-            self.controls.cutoff.value = min(
-                max(self.controls.cutoff.value, min_resolution),
-                max_resolution,
-            )
+            self.controls.cutoff.value = min(max(self.controls.cutoff.value, min_resolution), max_resolution)
         finally:
             self._updating_controls = False
 
@@ -123,14 +102,9 @@ class TiltSeriesLowPassController:
     def _filtered_or_original_data(self) -> np.ndarray:
         if self.current_original_data is None:
             raise ValueError("No tilt image is loaded.")
-        if not self.controls.lowpass_enabled.value or self.current_frequency_grid is None:
+        if not self.controls.lowpass_enabled.value or self.lowpass is None:
             return self.current_original_data
-        return apply_lowpass(
-            self.current_original_data,
-            self.current_frequency_grid,
-            self.controls.cutoff.value,
-            self.controls.filter_type.value,
-        )
+        return self.lowpass.apply(self.controls.cutoff.value, self.controls.filter_type.value)
 
     def _render_current_image(self) -> None:
         if self.image_layer is None or self.current_original_data is None:
@@ -152,7 +126,7 @@ class TiltSeriesLowPassController:
 
 class TiltSeriesExcluderController:
     IMAGE_PATTERNS = "*.mrc *.mrcs *.map *.st *.rec *.preali *.ali *.tif *.tiff *.png *.jpg *.jpeg"
-    MRC_SUFFIXES = {".mrc", ".mrcs", ".map", ".st", ".rec", ".preali", ".ali"}
+    MRC_SUFFIXES = set(MRC_SUFFIXES)
 
     def __init__(self, viewer: napari.Viewer) -> None:
         self.viewer = viewer
@@ -237,9 +211,7 @@ class TiltSeriesExcluderController:
         self.selection = [True] * len(records)
         self.record_labels = {record.label: idx for idx, record in enumerate(records)}
         self.controls.selected_tilt.choices = list(self.record_labels.keys())
-        self.controls.status.value = (
-            f"Loaded {len(records)} tilts from {mdoc_path.name}. Ordered by TiltAngle."
-        )
+        self.controls.status.value = f"Loaded {len(records)} tilts from {mdoc_path.name}. Ordered by TiltAngle."
         self.show_tilt(0)
 
     def show_tilt(self, index: int) -> None:
@@ -339,8 +311,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
     args = parse_args()
-    viewer = napari.Viewer(title="Napari Tilt Series Excluder")
+    viewer = napari.Viewer(title="EisGreis Tilt Series Excluder")
     controller = TiltSeriesExcluderController(viewer)
 
     if args.mdoc is not None:
