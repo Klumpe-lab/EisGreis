@@ -20,6 +20,9 @@ A session folder comes from one of two places:
   the desktop's autostart), and registers it: a line `{"kind": "desktop", "slurm_job_id", "session_dir", "started"}`
   appended to `~/.crboost/napari/registry.jsonl`.
 
+A desktop crboost starts for its own session sets `EISGREIS_NO_AUTOSTART` in it: the user's autostart entry, which
+the desktop runs too, then stands down rather than register a second viewer.
+
 ## `open.json`, crboost → viewer
 
 ```json

@@ -6,7 +6,9 @@
   (``~/.crboost/napari``), registers it there (``registry.jsonl``), and crboost finds it and writes its requests into
   it. With ``--wait`` it opens no window until the first request, and after the window is closed it waits for the
   next one, so the desktop stays reachable from crboost.
-- Started by crboost on a node (``--session-dir``): the folder is crboost's, which registered it.
+- Started by crboost on a node (``--session-dir``): the folder is crboost's, which registered it. That desktop sets
+  ``EISGREIS_NO_AUTOSTART``, so a ``--wait`` the user's autostart entry starts there stands down instead of becoming
+  a second viewer.
 
 Either way the viewer writes ``desktop.json`` and keeps ``alive`` fresh while it runs (``desktop.py``). Files given on
 the command line open as a request would, the first on screen; a ``--bundle`` shows crboost's picks and
@@ -185,6 +187,9 @@ def main(argv=None) -> None:
         return
     if args.check:
         print(json.dumps(check()))
+        return
+    if args.wait and os.environ.get("EISGREIS_NO_AUTOSTART"):
+        print("eisgreis-crboost: this desktop runs crboost's own viewer (EISGREIS_NO_AUTOSTART); not starting another")
         return
 
     if args.session_dir is not None:

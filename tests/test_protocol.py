@@ -88,3 +88,11 @@ def test_version_needs_no_qt():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
     record = json.loads(out.strip().splitlines()[-1])
     assert record["protocol"] == [1] and record["bundle_versions"] == [1] and record["eisgreis"]
+
+
+def test_autostart_stands_down_in_a_desktop_crboost_started(tmp_path, monkeypatch):
+    from eisgreis_crboost.__main__ import main
+
+    monkeypatch.setenv("EISGREIS_NO_AUTOSTART", "1")
+    main(["--wait", "--root", str(tmp_path / "napari")])
+    assert not (tmp_path / "napari").exists()
